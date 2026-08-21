@@ -175,6 +175,60 @@ describe('shareUrl', () => {
   });
 });
 
+describe('CORS entre as máquinas', () => {
+  // Só quem abre o site fora do Discord passa por aqui: ali o cliente fala com
+  // a máquina da sala pela origem absoluta dela. Sem estes headers o navegador
+  // barra o pedido antes de ele sair, e o servidor nem fica sabendo — o sintoma
+  // é uma sala que não abre com o log limpo dos dois lados.
+  it('libera a verificação prévia vinda de outra máquina do conjunto', async () => {
+    const r = await fetch(`${base}/api/rooms/list`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: LA,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type',
+      },
+    });
+
+    expect(r.status).toBe(204);
+    expect(r.headers.get('access-control-allow-origin')).toBe(LA);
+    expect(r.headers.get('access-control-allow-headers')).toMatch(/content-type/i);
+    expect(r.headers.get('vary')).toMatch(/origin/i);
+  });
+
+  it('responde o POST de verdade com a permissão', async () => {
+    const r = await fetch(`${base}/api/rooms/list`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: AQUI },
+      body: '{}',
+    });
+
+    expect(r.headers.get('access-control-allow-origin')).toBe(AQUI);
+  });
+
+  it('não libera origem de fora do conjunto', async () => {
+    const r = await fetch(`${base}/api/rooms/list`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://site-qualquer.test' },
+      body: '{}',
+    });
+
+    expect(r.headers.get('access-control-allow-origin')).toBe(null);
+  });
+
+  it('nunca promete cookie', async () => {
+    // O acesso à sala viaja em token no corpo. Liberar credencial aqui só
+    // ampliaria a superfície sem habilitar nada.
+    const r = await fetch(`${base}/api/rooms/list`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: LA },
+      body: '{}',
+    });
+
+    expect(r.headers.get('access-control-allow-credentials')).toBe(null);
+  });
+});
+
 describe('/api/config', () => {
   it('conta quantas máquinas existem e onde ficam', async () => {
     const r = await get('/api/config');

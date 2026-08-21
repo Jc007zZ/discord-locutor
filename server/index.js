@@ -208,6 +208,47 @@ app.use((req, res, next) => {
   next();
 });
 
+// CORS entre as máquinas do mesmo conjunto.
+//
+// Só existe por causa de quem abre o site fora do Discord. Ali não há proxy nem
+// mapeamento de caminho, então o cliente fala com a máquina da sala pela origem
+// absoluta dela — e um POST com Content-Type: application/json dispara
+// verificação prévia. Sem estes headers o navegador barra o pedido antes de ele
+// sair, e o sintoma é uma sala que nunca abre com o servidor intacto do outro
+// lado. Dentro da Activity nada disto é usado: lá é tudo mesma origem.
+//
+// A lista permitida são as próprias máquinas e o domínio de entrada, nunca `*`.
+// E sem `Allow-Credentials` de propósito: o acesso à sala viaja em token no
+// corpo, não em cookie, então liberar cookie aqui só ampliaria a superfície sem
+// habilitar nada. O painel admin, que é o único que usa cookie, não atravessa
+// máquina nenhuma.
+const ORIGENS_OK = new Set(FATIADO ? [...ORIGENS, PUBLIC_ORIGIN] : []);
+
+app.use((req, res, next) => {
+  // Numa máquina só não há origem cruzada para permitir, e o middleware sai
+  // antes de tocar em qualquer coisa — inclusive no OPTIONS, que hoje cai no
+  // catch-all e deve continuar caindo.
+  if (!FATIADO) return next();
+
+  const origem = req.headers.origin;
+
+  if (origem && ORIGENS_OK.has(origem)) {
+    res.setHeader('Access-Control-Allow-Origin', origem);
+    // A resposta muda conforme a origem que pediu: sem isto um cache
+    // intermediário serviria a permissão de uma para outra.
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+
+  // A verificação prévia morre aqui: ela não tem corpo e não deve cair em rota
+  // nenhuma.
+  if (req.method === 'OPTIONS') return res.status(204).end();
+
+  next();
+});
+
 app.use(express.json());
 
 // Uma Activity roda dentro de um iframe em <id>.discordsays.com, que por sua

@@ -168,6 +168,15 @@ e só cobra a conta no dia em que se acrescenta uma máquina.
   e vai acertar sozinho.
 - `/api/config` passa a devolver a lista de origens e o total de máquinas, para o
   cliente fora do Discord.
+- **CORS entre as máquinas do conjunto**, e só quando há mais de uma. Existe por
+  causa de quem abre o site fora do Discord: ali o cliente fala com a máquina da
+  sala pela origem absoluta dela, e um POST com `Content-Type: application/json`
+  dispara verificação prévia. Sem isso o navegador barra o pedido antes de ele
+  sair e o servidor nem fica sabendo — o sintoma é uma sala que não abre com o
+  log limpo dos dois lados. A lista permitida são as próprias máquinas e o
+  domínio de entrada, nunca `*`, e sem `Allow-Credentials`: o acesso à sala viaja
+  em token no corpo, não em cookie. Dentro da Activity nada disso é usado, porque
+  lá é tudo mesma origem.
 
 Os tokens já atravessam máquinas sem trabalho nenhum: a assinatura é HMAC com
 `SESSION_SECRET` (`server/tokens.js`), então basta as aplicações compartilharem o
@@ -229,7 +238,10 @@ ele vira a porta de entrada do que não tem estado. Vale conferir no painel o
 limite de aplicações por domínio, que varia por plano.
 
 **Portal do Discord, URL mappings.** É aqui que o roteamento por prefixo
-acontece de verdade dentro da Activity:
+acontece de verdade dentro da Activity, e **sem isto nada funciona**: o
+balanceador da Square Cloud reveza requisições e não sabe ler caminho, então um
+pedido `/n1/...` cairia na máquina 0 metade das vezes e receberia `421`. As
+mappings aceitam `prefixo → host`, uma por máquina:
 
 ```
 /     →  domínio do balanceador
