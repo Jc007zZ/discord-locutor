@@ -1725,28 +1725,35 @@ async function loadConfig() {
 }
 
 /**
- * Detecta bundle velho e recarrega.
+ * Detecta HTML velho e recarrega.
  *
  * O index.html vai com no-store, mas o cliente do Discord pode entregar uma
  * cópia antiga assim mesmo — e o iframe fica preso num build anterior sem
  * nenhum sinal visível, o que já custou horas de diagnóstico enganoso.
  *
- * Comparamos o nome do próprio arquivo (que leva hash de conteúdo) com o que o
- * servidor diz ser o atual.
+ * Já foi "detecta bundle velho", e comparava o nome do próprio arquivo, que
+ * levava hash de conteúdo. O nome virou fixo (client/vite.config.js) para que
+ * um HTML velho consiga carregar o JS novo em vez de pedir um hash apagado, e
+ * isso mudou o alvo da checagem: o JS que está rodando é sempre o atual, então
+ * o que pode estar velho é só o HTML em volta dele. E ainda importa — um HTML
+ * anterior pode não ter os elementos que este JS espera encontrar.
+ *
+ * Comparamos, então, o carimbo que o build deixou no HTML com o que o servidor
+ * diz ser o atual.
  */
 function checkVersion(asset) {
-  const mine = import.meta.url.split('/').pop().split('?')[0];
+  const mine = document.querySelector('meta[name="build"]')?.content ?? null;
 
-  // Em desenvolvimento o Vite serve `main.js` sem hash nenhum, enquanto o
-  // servidor relata o nome do último build. Comparar os dois acusa uma
+  // Em desenvolvimento o Vite serve o index.html da fonte, sem carimbo nenhum,
+  // enquanto o servidor relata o do último build. Comparar os dois acusa uma
   // desatualização que não existe e joga a página num recarregamento eterno.
   //
-  // A pergunta "isto é um build?" é respondida pelo próprio nome do arquivo, e
-  // não por `import.meta.env.DEV`. O DEV depende de NODE_ENV, que este projeto
+  // A pergunta "isto é um build?" é respondida pela presença do carimbo, e não
+  // por `import.meta.env.DEV`. O DEV depende de NODE_ENV, que este projeto
   // define como "development" no .env — e o Vite lê esse arquivo. Resultado: no
   // build de produção o DEV vinha true, e a função inteira era removida por
   // codigo morto. Ela existia sem nunca rodar.
-  if (!/^index-[A-Za-z0-9_-]+.js$/.test(mine)) return;
+  if (!mine) return;
 
   if (!asset || asset === mine) return;
 

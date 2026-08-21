@@ -84,6 +84,35 @@ describe('/api/config', () => {
   });
 });
 
+describe('site buildado', () => {
+  // Esta é a regressão que custou uma Activity em branco depois de todo deploy.
+  //
+  // O cliente do Discord serve um index.html anterior apesar do no-store, e
+  // esse HTML pede o bundle daquele build. Enquanto o nome levava hash, o
+  // arquivo pedido tinha sido apagado pelo build seguinte — e o catch-all, que
+  // atende todo caminho fora de /api, respondia com o index.html: 200 com
+  // text/html para um pedido de módulo JS. O navegador recusa executar por
+  // MIME, a página fica branca, e o log do servidor não registra nada de
+  // errado, porque do lado de cá foi 200.
+  //
+  // O que trava o defeito não é o status: é o corpo não ser HTML.
+  it('devolve 404 para asset que não existe, em vez do index.html', async () => {
+    const resposta = await get('/assets/index-NAOEXISTE.js');
+
+    expect(resposta.status).toBe(404);
+    // Não basta o status: o que quebrava o navegador era receber a página. O
+    // 404 do Express também é text/html, então quem distingue é o corpo.
+    expect(await resposta.text()).not.toContain('<div id="app">');
+  });
+
+  it('ainda entrega a página para caminho sem extensão, que é rota da aplicação', async () => {
+    const resposta = await get('/uma/rota/qualquer');
+
+    expect(resposta.status).toBe(200);
+    expect(resposta.headers.get('content-type')).toContain('text/html');
+  });
+});
+
 describe('cabeçalhos', () => {
   it('autoriza o Discord a desenhar isto num iframe', async () => {
     const csp = (await get('/api/health')).headers.get('content-security-policy');
