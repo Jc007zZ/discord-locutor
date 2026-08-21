@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { defineConfig } from 'vite';
 
 /**
@@ -8,20 +9,47 @@ import { defineConfig } from 'vite';
  * disso é o `checkVersion` do cliente, e o que ele quer descobrir é se o HTML
  * que recebeu é velho — não o JS, que agora é sempre o atual.
  *
+ * O carimbo sai do **conteúdo** do build, não do relógio. Era `Date.now()`, e
+ * isso funciona enquanto existe uma máquina só: duas máquinas constroem o mesmo
+ * commit em instantes diferentes e produziriam carimbos diferentes. Como o HTML
+ * pode vir de uma e o `/api/config` da outra, o cliente concluiria que está
+ * velho sendo que não está — e dentro do Discord isso vira o aviso "feche e abra
+ * de novo" aparecendo para sempre, metade das vezes. Derivado do conteúdo, o
+ * mesmo commit dá o mesmo carimbo em qualquer máquina, e a comparação volta a
+ * significar o que promete.
+ *
  * Só no build: em desenvolvimento o Vite serve o `index.html` da fonte, sem
  * carimbo, e a ausência da meta é o que faz o cliente não comparar nada.
  */
 function carimbo() {
-  const stamp = Date.now().toString(36);
   return {
     name: 'carimbo-de-build',
     apply: 'build',
-    // A forma de descritor, e não um replace no texto: injetando à mão logo
-    // depois de `<head>` a meta entrava na frente do `charset`, que precisa
-    // ser a primeira coisa do cabeçalho.
-    transformIndexHtml: () => [
-      { tag: 'meta', attrs: { name: 'build', content: stamp }, injectTo: 'head' },
-    ],
+    transformIndexHtml: {
+      // Depois de tudo: é aqui que o bundle final existe para ser resumido.
+      order: 'post',
+      handler(_html, ctx) {
+        const soma = crypto.createHash('sha256');
+
+        // Ordenado pelo nome, porque a ordem em que o rollup emite não é
+        // contrato: sem isto, dois builds idênticos poderiam somar na ordem
+        // trocada e dar carimbos diferentes — justamente o que se quer evitar.
+        for (const nome of Object.keys(ctx.bundle ?? {}).sort()) {
+          const item = ctx.bundle[nome];
+          soma.update(nome);
+          soma.update(item.type === 'chunk' ? item.code : Buffer.from(item.source));
+        }
+
+        // base64url, e não hex: cabe mais entropia no mesmo tamanho e o
+        // alfabeto bate com o que o servidor aceita ao ler esta meta de volta.
+        const stamp = soma.digest('base64url').slice(0, 12);
+
+        // A forma de descritor, e não um replace no texto: injetando à mão logo
+        // depois de `<head>` a meta entrava na frente do `charset`, que precisa
+        // ser a primeira coisa do cabeçalho.
+        return [{ tag: 'meta', attrs: { name: 'build', content: stamp }, injectTo: 'head' }];
+      },
+    },
   };
 }
 
