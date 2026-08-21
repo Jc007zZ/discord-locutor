@@ -874,10 +874,16 @@ app.get('/api/admin/metrics', requireAdmin, (_req, res) => {
  * O Client ID é público por natureza — aparece em toda URL de OAuth —, então
  * servi-lo aqui não expõe nada. O secret continua sem sair do servidor.
  *
- * `asset` é o nome do bundle atual, para a Activity perceber que está rodando
- * uma versão velha. O index.html vai com no-store, mas o cliente do Discord
- * pode entregar uma cópia antiga assim mesmo, e o iframe fica preso num build
- * anterior sem nenhum sinal visível.
+ * `asset` é o carimbo do build atual, para a Activity perceber que está rodando
+ * com um HTML velho. O index.html vai com no-store, mas o cliente do Discord
+ * pode entregar uma cópia antiga assim mesmo.
+ *
+ * Já foi o nome do bundle, que levava hash de conteúdo. Não leva mais — o nome
+ * virou fixo justamente para o HTML velho conseguir carregar o JS novo (ver
+ * client/vite.config.js), e com isso o nome deixou de distinguir uma versão da
+ * outra. Quem distingue agora é a meta `build`, carimbada no HTML pelo build.
+ * O que se compara também mudou de objeto: o JS é sempre o atual, então o que
+ * pode estar velho é o HTML, e é dele que sai o carimbo dos dois lados.
  */
 app.get('/api/config', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -885,7 +891,7 @@ app.get('/api/config', (_req, res) => {
   let asset = null;
   try {
     const html = fs.readFileSync(path.join(clientDist, 'index.html'), 'utf8');
-    asset = html.match(/assets\/(index-[A-Za-z0-9_-]+\.js)/)?.[1] ?? null;
+    asset = html.match(/<meta name="build" content="([A-Za-z0-9_-]+)"/)?.[1] ?? null;
   } catch {
     // Ainda sem build; em desenvolvimento quem serve o cliente é o Vite.
   }
@@ -900,18 +906,30 @@ const clientDist = path.join(__dirname, '..', 'client', 'dist');
 
 app.use(
   express.static(clientDist, {
-    setHeaders: (res, filePath) => {
-      // Arquivos em /assets levam hash de conteúdo no nome — o Vite gera um
-      // nome novo a cada build, então cachear para sempre é seguro.
-      // O index.html aponta para eles e precisa ser sempre fresco.
-      const hashed = filePath.includes(`${path.sep}assets${path.sep}`);
-      res.setHeader('Cache-Control', hashed ? 'public, max-age=31536000, immutable' : 'no-store');
-    },
+    // Nada aqui leva hash de conteúdo no nome. Já levou, e o `immutable` que
+    // acompanhava era correto enquanto o nome mudava a cada build; agora o
+    // nome é fixo (client/vite.config.js) e cachear para sempre prenderia a
+    // Activity num build antigo — exatamente o defeito que o nome fixo veio
+    // resolver, só que pior, porque duraria um ano.
+    //
+    // É a mesma política de server/public e de /shared, e pelo mesmo motivo:
+    // nome fixo pede resposta fresca.
+    setHeaders: (res) => res.setHeader('Cache-Control', 'no-store'),
   }),
 );
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
+
+  // Um arquivo precisa falhar como arquivo. Este catch-all existe para o
+  // roteamento da aplicação — caminhos que a Activity resolve sozinha —, e sem
+  // esta linha ele também respondia aos pedidos de asset que o static não
+  // achou: 200 com text/html no lugar de um módulo JS. O navegador recusa
+  // executar por MIME, nada roda, e a página fica em branco sem uma linha no
+  // log, porque do lado de cá foi tudo 200. Um 404 honesto aparece no console
+  // em três segundos.
+  if (path.extname(req.path)) return next();
+
   res.setHeader('Cache-Control', 'no-store');
   res.sendFile(path.join(clientDist, 'index.html'), (err) => err && next());
 });
