@@ -138,6 +138,38 @@ sudo -u sala npm run build
 sudo systemctl restart sala-de-tela
 ```
 
+Esse `npm run build` roda com o servidor antigo ainda no ar, e o Vite apaga o
+`client/dist` antes de escrever o novo: durante esses segundos o site inteiro
+responde 404, inclusive o `/`. No navegador ninguém nota — recarrega e pronto.
+O proxy do Discord pode guardar a resposta de erro e esticar o estrago muito
+além do deploy. Para fechar a janela, monte fora e troque de uma vez:
+
+```bash
+sudo -u sala npm -w client run build -- --outDir dist.novo
+sudo -u sala rm -rf client/dist.velho
+sudo -u sala mv client/dist client/dist.velho
+sudo -u sala mv client/dist.novo client/dist
+sudo systemctl restart sala-de-tela
+```
+
+O `dist.velho` que sobra serve para voltar atrás — `mv` de novo, na ordem
+inversa, e o site anterior está no ar. Só isso: um diretório irmão **não** é
+servido por ninguém. O servidor monta um único caminho estático
+(`client/dist`), então quem chegar pedindo um arquivo do build anterior toma
+404 do mesmo jeito.
+
+Se quiser que os arquivos antigos continuem alcançáveis, eles precisam entrar
+no `dist` novo, antes da troca:
+
+```bash
+sudo -u sala cp -rn client/dist/assets/. client/dist.novo/assets/
+```
+
+É paliativo, e cresce: cada deploy soma um par JS+CSS que nunca sai, porque a
+união seguinte carrega a anterior junto. O conserto de verdade é o nome fixo no
+arquivo de entrada, descrito em
+[A tela branca depois de um deploy](como-funciona.md#a-tela-branca-depois-de-um-deploy).
+
 ## Quando algo der errado
 
 ```bash
@@ -149,3 +181,19 @@ curl -sI https://seu-dominio | grep -i x-frame   # não deve devolver nada
 Aquele `curl` é o teste que faltou fazer cedo demais neste projeto: se aparecer
 um `x-frame-options`, a Activity vai abrir branca, e o problema está em quem
 está na frente do servidor — não no código.
+
+### Duas telas brancas diferentes
+
+A do `x-frame-options` é permanente: a Activity nunca abre, em máquina nenhuma,
+e o mesmo endereço funciona quando aberto direto no navegador.
+
+A outra aparece **só depois de um deploy**, dura um tempo e passa sozinha,
+enquanto o site vai bem o tempo todo. Essa não está na borda — é o cliente do
+Discord servindo um `index.html` velho, que pede arquivos que o build novo
+apagou. O diagnóstico e o conserto estão em
+[A tela branca depois de um deploy](como-funciona.md#a-tela-branca-depois-de-um-deploy).
+
+```bash
+# 200 com content-type text/html aqui confirma o caso
+curl -sI https://seu-dominio/assets/index-naoexiste.js | head -2
+```

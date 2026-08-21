@@ -4,3 +4,6 @@ node_modules/
 site/
 coverage/
 package-lock.json
+
+# Worktrees do Claude Code: copia do repositorio, revisada no lugar de origem.
+.claude/

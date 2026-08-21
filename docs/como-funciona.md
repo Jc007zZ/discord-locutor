@@ -196,6 +196,98 @@ banda, e por isso é escolha de quem hospeda, não padrão.
   rebuildar a cada troca de credencial, e esquecer disso não dava erro: a
   atividade abria e só quebrava no login.
 
+## A tela branca depois de um deploy
+
+O sintoma: você atualiza o servidor, o site abre normalmente no navegador, e a
+atividade no Discord fica um retângulo branco por um tempo longo — sem erro
+nenhum no log, com o servidor respondendo 200 a tudo. Depois de um tempo
+indeterminado ela volta sozinha.
+
+Não é o mesmo retângulo branco do `X-Frame-Options` descrito em
+[vps.md](vps.md): aquele é permanente e vem da borda da hospedagem. Este é
+temporário e vem de três peças nossas que só produzem o defeito quando se
+encaixam — nenhuma delas é visível olhando para uma só.
+
+**1. Cada build troca o nome dos arquivos.** O Vite escreve
+`assets/index-<hash>.js` com hash do conteúdo, e `emptyOutDir: true` apaga o
+`dist` inteiro antes de escrever o novo. Terminado o deploy, o bundle anterior
+não existe mais em lugar nenhum.
+
+**2. O Discord entrega um `index.html` velho.** O servidor manda `no-store`
+nele, e no navegador isso basta. Entre o iframe e a hospedagem, porém, existem
+duas camadas que o navegador comum não tem: o proxy `<app-id>.discordsays.com`
+e o cache do Chromium dentro do cliente desktop — que sobrevive a fechar e
+reabrir a atividade. É a mesma observação que motivou o `checkVersion`. Esse
+HTML velho pede o hash velho.
+
+**3. O catch-all devolve HTML no lugar do arquivo que sumiu.** O
+`express.static` dá 404 no hash velho, e a rota `app.get('*')` do
+`server/index.js` atende qualquer caminho fora de `/api` com o `index.html`.
+O pedido de um módulo JS recebe, então, **200 com `Content-Type: text/html`**.
+O Chromium recusa executar (`Failed to load module script: expected a
+JavaScript module script but the server responded with a MIME type of
+text/html`), e o CSS leva o mesmo tratamento. Nenhum script roda, nenhum estilo
+aplica: retângulo branco. Do lado do servidor tudo foi 200 — daí o log limpo.
+
+O `checkVersion` foi escrito exatamente para avisar disso, mas não alcança este
+caso: ele vive dentro do bundle que não carregou. O aviso "feche e abra de
+novo" nunca chega a aparecer.
+
+E o site não sofre porque no navegador existe F5: o `no-store` do `index.html`
+é respeitado, vem HTML novo com hashes novos, funciona na hora. Dentro da
+atividade não há F5, e o cache que serve aquele HTML não é seu — só resta
+esperar ele expirar.
+
+### O conserto
+
+O ponto de ataque é a peça 1, não a 2: o cache do Discord não está sob nosso
+controle, mas o nome do arquivo está. **Se o HTML velho pedir um nome que
+continua existindo, ele carrega o JS novo** e o problema desaparece na raiz.
+
+```js
+// client/vite.config.js
+build: {
+  outDir: 'dist',
+  emptyOutDir: true,
+  rollupOptions: {
+    output: {
+      entryFileNames: 'assets/app.js',
+      assetFileNames: 'assets/[name][extname]',
+    },
+  },
+}
+```
+
+Nome fixo pede a política de cache oposta: no `server/index.js`, a regra que
+carimba `immutable` em tudo que está em `/assets` passa a carimbar `no-store`
+nesses dois. O que se perde é o cache eterno do bundle de entrada — irrelevante
+num arquivo que muda a cada deploy e que o proxy do Discord ia servir velho de
+qualquer jeito.
+
+Dois complementos que valem por si:
+
+- **404 de verdade para caminho com extensão.** Um `if (path.extname(req.path))
+  return next()` no começo do catch-all. A rota existe para o roteamento da
+  aplicação, não para asset — e devolver HTML no lugar de um `.js` que faltou
+  troca um erro visível em três segundos por uma tela branca muda.
+- **Build atômico.** Hoje o `npm run build` roda com o servidor antigo ainda no
+  ar, e o `emptyOutDir` deixa vários segundos em que o `dist` está vazio e o
+  site inteiro responde 404 — inclusive o `/`. Se o proxy do Discord pegar uma
+  resposta de erro nessa janela, ele a guarda, e a tela branca dura bem mais
+  que o deploy. Montar em `client/dist.novo` e trocar com `mv` fecha a janela.
+
+### Como confirmar que é isto
+
+Abra o devtools da atividade no Discord desktop (Ctrl+Shift+I, com o modo
+desenvolvedor ligado) logo depois de um deploy. O erro de MIME type no console
+é a assinatura. Do lado de fora dá para ver o mesmo sem o Discord:
+
+```bash
+curl -sI https://seu-dominio/assets/index-HASHQUENAOEXISTE.js | head -2
+```
+
+Se vier `200` e `content-type: text/html`, é o catch-all respondendo.
+
 ## Estrutura
 
 ```
