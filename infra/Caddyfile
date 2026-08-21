@@ -21,3 +21,37 @@ discordbr.live {
 	# inteiro — o Discord embute a página num iframe e o navegador obedece ao
 	# header antes de qualquer coisa. Ver o comentário em server/index.js.
 }
+
+# ---------------------------------------------------------------- sharding
+#
+# Só para quem roda em mais de uma máquina. Uma só é o padrão, e aí nada disto
+# existe: o bloco acima basta. Ver docs/sharding.md.
+#
+# O servidor guarda as salas em memória, então a call inteira precisa cair
+# sempre na mesma máquina. Quem escolhe é o cliente, que calcula o nó e pede
+# pelo prefixo; a borda só precisa honrar o prefixo. `handle_path` corta o
+# `/n0` antes de repassar — o servidor corta de novo se ele chegar, então os
+# dois arranjos funcionam.
+#
+# Atenção ao custo: neste desenho toda a banda do relay atravessa o Caddy, e
+# você paga a banda duas vezes. Atrás de aplicações com endereço próprio — o
+# caso da Square Cloud — o melhor é não ter proxy nenhum no caminho e deixar as
+# URL mappings do portal do Discord rotearem direto para cada máquina.
+#
+# discordbr.live {
+# 	handle_path /n0/* {
+# 		reverse_proxy 10.0.0.10:3001
+# 	}
+#
+# 	handle_path /n1/* {
+# 		reverse_proxy 10.0.0.11:3001
+# 	}
+#
+# 	# Sem prefixo: o que não tem estado (o site, o /api/config) pode ser
+# 	# atendido por qualquer uma.
+# 	handle {
+# 		reverse_proxy 10.0.0.10:3001
+# 	}
+#
+# 	encode zstd gzip
+# }

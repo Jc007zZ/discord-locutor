@@ -11,6 +11,7 @@ import { signToken, verifyToken } from './tokens.js';
 import * as R from './rooms.js';
 import { systemSnapshot, startSampling } from './system.js';
 import { buildAdminDashboard } from './admin.js';
+import { basePathFor, nodeFor, shardKey, stripNode } from '../shared/shard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -24,6 +25,9 @@ const {
   TURN_USER = '',
   TURN_PASS = '',
   PUBLIC_ORIGIN: ORIGEM_CRUA = 'http://localhost:3001',
+  SHARD_INDEX = '0',
+  SHARD_NODES = '1',
+  NODE_ORIGINS = '',
   PORT = 3001,
   NODE_ENV = 'development',
 } = process.env;
@@ -32,6 +36,69 @@ const {
 // redirect do OAuth vira "//auth/callback", que não bate com o endereço
 // cadastrado no portal. O login falha sem explicar nada.
 const PUBLIC_ORIGIN = ORIGEM_CRUA.replace(/[/]+$/, '');
+
+// ------------------------------------------------------------------- sharding
+//
+// Este processo guarda as salas em memória e o relay só alcança os sockets dele
+// mesmo. Rodar em mais de uma máquina exige que a call inteira — quem transmite
+// e quem assiste — caia sempre na mesma; ver docs/sharding.md.
+//
+// O padrão é uma máquina só, e aí tudo abaixo é inerte: `nodeFor` devolve 0 para
+// qualquer chave, nenhum pedido é recusado e nenhum prefixo aparece nas URLs. É
+// o que roda na casa de quem só quer ver a tela de um amigo.
+const NOS = Math.max(1, Math.trunc(Number(SHARD_NODES)) || 1);
+const EU = Math.min(NOS - 1, Math.max(0, Math.trunc(Number(SHARD_INDEX)) || 0));
+const FATIADO = NOS > 1;
+
+// As origens públicas de cada máquina, na ordem dos índices. Servem para dizer a
+// quem bateu na porta errada para onde ir, e para o shareUrl apontar para a
+// máquina dona da sala.
+const ORIGENS = String(NODE_ORIGINS)
+  .split(/[\s,;]+/)
+  .filter(Boolean)
+  .map((o) => o.replace(/[/]+$/, ''));
+
+if (FATIADO && ORIGENS.length !== NOS) {
+  console.error(`ERRO: NODE_ORIGINS tem ${ORIGENS.length} endereco(s) para SHARD_NODES=${NOS}.`);
+  console.error(
+    '      Sem a lista completa nao ha como redirecionar quem chegar na maquina errada.',
+  );
+  process.exit(1);
+}
+
+/** A origem pública de uma máquina. Sem sharding, a deste processo. */
+const origemDoNo = (i) => ORIGENS[i] ?? PUBLIC_ORIGIN;
+
+/** O nó dono de uma chave de shard. */
+const noDaChave = (key) => nodeFor(key, NOS);
+
+/** A chave de shard de uma identidade ou de um token de sala. */
+const chaveDe = (me) =>
+  shardKey({ channel: me?.channel ?? me?.call ?? null, instance: me?.instance ?? null });
+
+/**
+ * Recusa o pedido quando a chave pertence a outra máquina.
+ *
+ * Devolve `true` quando recusou, para quem chama sair na hora. O cliente calcula
+ * o mesmo nó sozinho e normalmente já bate no lugar certo — isto é a rede de
+ * proteção para bundle velho, borda mal configurada e link antigo, casos em que
+ * o sintoma sem esta checagem seria uma sala vazia, sem erro nenhum.
+ */
+function outraMaquina(key, res) {
+  if (!FATIADO) return false;
+
+  const dono = noDaChave(key);
+  if (dono === EU) return false;
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(409).json({
+    error: 'wrong_node',
+    node: dono,
+    base: basePathFor(dono),
+    origin: origemDoNo(dono),
+  });
+  return true;
+}
 
 const isProd = NODE_ENV === 'production';
 // Mais de uma pessoa administra: separe os IDs por virgula. Um Set porque a
@@ -111,6 +178,33 @@ app.use((req, _res, next) => {
     // caminho prefixado — um salto a mais para chegar no mesmo lugar.
     req.originalUrl = req.url;
   }
+  next();
+});
+
+// Depois do /.proxy vem o prefixo da máquina: /n0, /n1, … É por ele que a borda
+// — as URL mappings do portal do Discord, ou um proxy próprio — entrega a call
+// na máquina dona dela. Ver docs/sharding.md.
+app.use((req, res, next) => {
+  // A query fica de fora do corte: `stripNode` decide por caminho, e um "?"
+  // logo depois do prefixo faria a fronteira falhar sem motivo.
+  const corte = req.url.indexOf('?');
+  const caminho = corte < 0 ? req.url : req.url.slice(0, corte);
+  const busca = corte < 0 ? '' : req.url.slice(corte);
+
+  const { index, path: limpo } = stripNode(caminho);
+  if (index === null) return next();
+
+  // Prefixo de outra máquina quer dizer que a borda roteou errado. Responder
+  // isso em vez de seguir e cair no 404 do catch-all é o que separa "o
+  // mapeamento está errado" de "a sala não existe" — e é a diferença entre
+  // olhar o painel do Discord e procurar um bug que não existe no código.
+  if (index !== EU) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(421).json({ error: 'misdirected', node: EU, base: basePathFor(EU) });
+  }
+
+  req.url = limpo + busca;
+  req.originalUrl = req.url;
   next();
 });
 
@@ -243,6 +337,18 @@ app.post('/api/session', async (req, res) => {
     return res.status(400).json({ error: 'access_token e instance_id obrigatorios' });
   }
 
+  // Validado antes da chave de shard, e não depois como estava: um channel_id
+  // recusado pelo formato não entra no token, e a sala vira `atividade-<id>`.
+  // Fatiar pelo valor cru mandaria a sessão para uma máquina e as chamadas de
+  // sala seguintes para outra.
+  const guildId = /^[0-9]{15,21}$/.test(String(guild_id ?? '')) ? String(guild_id) : null;
+  const channelId = /^[0-9]{15,21}$/.test(String(channel_id ?? '')) ? String(channel_id) : null;
+
+  // A checagem vem antes de falar com o Discord: recusar depois gastaria duas
+  // idas à API para nada. O cliente já calculou este mesmo nó antes de chamar,
+  // então na prática isto só dispara para bundle velho ou borda mal roteada.
+  if (outraMaquina(shardKey({ channel: channelId, instance: instance_id }), res)) return;
+
   try {
     const me = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${access_token}` },
@@ -250,8 +356,6 @@ app.post('/api/session', async (req, res) => {
 
     if (!me?.id) return res.status(401).json({ error: 'token invalido' });
 
-    const guildId = /^[0-9]{15,21}$/.test(String(guild_id ?? '')) ? String(guild_id) : null;
-    const channelId = /^[0-9]{15,21}$/.test(String(channel_id ?? '')) ? String(channel_id) : null;
     const [presenca, guildName] = await Promise.all([
       inVoiceChannel(guildId, channelId, me.id),
       resolveGuildName(guildId),
@@ -512,6 +616,12 @@ function identityOf(req, res) {
  *
  * Sem prazo de validade: quem entrou fica. A sala fecha ao esvaziar e o id é
  * aleatório, então o token morre junto com ela.
+ *
+ * O shareUrl aponta para a origem da máquina dona da sala, não para a deste
+ * processo. É o que faz a aba de captura carregar já do lugar certo — e é por
+ * isso que `server/public/share.js` não precisa saber que existe sharding: ele
+ * monta o endereço do socket a partir do `location.host`, que a essa altura já
+ * é o da máquina certa.
  */
 function issueRoomTokens(roomId, me) {
   const base = {
@@ -525,7 +635,7 @@ function issueRoomTokens(roomId, me) {
   return {
     roomId,
     viewerToken: signToken({ ...base, role: 'viewer' }),
-    shareUrl: `${PUBLIC_ORIGIN}/share.html?t=${encodeURIComponent(
+    shareUrl: `${origemDoNo(noDaChave(chaveDe(me)))}/share.html?t=${encodeURIComponent(
       signToken({ ...base, role: 'broadcaster' }),
     )}`,
   };
@@ -541,13 +651,21 @@ function issueRoomTokens(roomId, me) {
  */
 app.post('/api/rooms/list', (req, res) => {
   const me = verifyToken(req.body?.identity);
-  const instance = me?.scope === 'identity' ? me.instance : WEB_INSTANCE;
+  const identificado = me?.scope === 'identity';
+  const instance = identificado ? me.instance : WEB_INSTANCE;
+
+  // Todas as salas de um canal moram na mesma máquina, então a lista de uma
+  // instância nunca está partida — mas quem perguntar no lugar errado receberia
+  // uma lista vazia em vez de um erro, que é o pior tipo de resposta errada.
+  if (outraMaquina(identificado ? chaveDe(me) : WEB_INSTANCE, res)) return;
+
   res.json({ rooms: R.listRooms(instance) });
 });
 
 app.post('/api/rooms/create', (req, res) => {
   const me = identityOf(req, res);
   if (!me) return;
+  if (outraMaquina(chaveDe(me), res)) return;
 
   const { room, error } = R.createRoom({
     instance: me.instance,
@@ -579,6 +697,7 @@ const salaDaCall = (me) => (me.call ? `call-${me.call}` : `atividade-${me.instan
 app.post('/api/rooms/call', (req, res) => {
   const me = identityOf(req, res);
   if (!me) return;
+  if (outraMaquina(chaveDe(me), res)) return;
 
   const room = R.ensureCallRoom(me.instance, salaDaCall(me), {
     guildId: me.guild ?? null,
@@ -591,6 +710,7 @@ app.post('/api/rooms/call', (req, res) => {
 app.post('/api/rooms/join', (req, res) => {
   const me = identityOf(req, res);
   if (!me) return;
+  if (outraMaquina(chaveDe(me), res)) return;
 
   const room = R.getRoom(req.body?.roomId);
   if (!room) return res.status(404).json({ error: 'Sala não existe mais.' });
@@ -643,6 +763,10 @@ app.post('/api/rooms/open', (req, res) => {
     return res.status(401).json({ error: 'Link inválido ou expirado.' });
   }
 
+  // A chave sai do próprio ingresso, que leva o canal assinado dentro dele. Uma
+  // sala do site não tem canal e cai no lobby, que é onde ela mora mesmo.
+  if (outraMaquina(chaveDe(ingresso), res)) return;
+
   const room = R.getRoom(ingresso.room);
   if (!room) return res.status(404).json({ error: 'Sala não existe mais.' });
 
@@ -652,6 +776,7 @@ app.post('/api/rooms/open', (req, res) => {
 app.post('/api/rooms/password', (req, res) => {
   const me = identityOf(req, res);
   if (!me) return;
+  if (outraMaquina(chaveDe(me), res)) return;
 
   const room = R.getRoom(req.body?.roomId);
   if (!room || room.instance !== me.instance) {
@@ -892,7 +1017,18 @@ app.get('/api/config', (_req, res) => {
 
   // || e nao ??: uma variavel vazia no .env chega como string vazia, e o
   // contrato aqui e "null significa nao configurado".
-  res.json({ clientId: DISCORD_CLIENT_ID || null, asset });
+  //
+  // `nodes` só serve a quem abre o site fora do Discord: lá não há proxy nem
+  // mapeamento de caminho, então o cliente precisa da origem absoluta da máquina
+  // para onde vai. Dentro da Activity o prefixo basta. Este endpoint não tem
+  // estado, então qualquer máquina responde — é por isso que ele fica de fora do
+  // roteamento por chave.
+  res.json({
+    clientId: DISCORD_CLIENT_ID || null,
+    asset,
+    shards: NOS,
+    nodes: FATIADO ? ORIGENS : [],
+  });
 });
 
 // Activity buildada (produção). Em dev o Vite serve o client na 5173.
@@ -912,6 +1048,7 @@ app.use(
 
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
+
   res.setHeader('Cache-Control', 'no-store');
   res.sendFile(path.join(clientDist, 'index.html'), (err) => err && next());
 });
@@ -925,11 +1062,19 @@ const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
-  // O proxy do Discord entrega o caminho com o prefixo /.proxy/.
+  // O proxy do Discord entrega o caminho com o prefixo /.proxy/, e a borda do
+  // sharding acrescenta o /nK antes dele chegar aqui.
   const url = new URL(req.url, 'http://localhost');
-  const pathname = url.pathname.replace(/^\/\.proxy/, '');
+  const semProxy = url.pathname.replace(/^\/\.proxy/, '');
+  const { index: no, path: pathname } = stripNode(semProxy);
 
   if (pathname !== '/ws') {
+    socket.destroy();
+    return;
+  }
+
+  if (no !== null && no !== EU) {
+    socket.write('HTTP/1.1 421 Misdirected Request\r\n\r\n');
     socket.destroy();
     return;
   }
@@ -938,6 +1083,16 @@ server.on('upgrade', (req, socket, head) => {
   // scope 'identity' não dá acesso a sala nenhuma: só os tokens de sala servem.
   if (!payload || !payload.room) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  // O token de sala leva o canal assinado dentro dele, então dá para recusar
+  // antes de aceitar a conexão. Sem isto, um socket entraria numa máquina que
+  // não tem a sala e a pessoa ficaria olhando uma tela preta: o relay estaria
+  // funcionando perfeitamente, do outro lado.
+  if (FATIADO && noDaChave(chaveDe(payload)) !== EU) {
+    socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
     socket.destroy();
     return;
   }

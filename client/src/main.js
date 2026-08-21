@@ -10,6 +10,7 @@ import {
   MORTO,
   PRAZO_CONEXAO_MS,
 } from '../../shared/rtc.js';
+import { basePathFor, nodeFor, shardKey } from '../../shared/shard.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,6 +21,44 @@ const inDiscord = params.has('frame_id');
 
 // Dentro da Activity todo tráfego precisa passar pelo proxy do Discord.
 const P = inDiscord ? '/.proxy' : '';
+
+// A base da máquina que atende esta call. Quando o servidor roda numa máquina
+// só — o padrão — fica vazia e tudo continua como sempre foi.
+//
+// O servidor guarda as salas em memória, então a call inteira precisa cair na
+// mesma máquina; ver docs/sharding.md. Quem decide é o próprio cliente, com a
+// mesma função do servidor e com o channelId que o SDK do Discord entrega antes
+// de qualquer ida ao servidor — assim não custa nem um round-trip a mais.
+//
+// Dentro da Activity é um prefixo de caminho (`/.proxy/n1`), porque é assim que
+// as URL mappings do portal roteiam. Fora, é a origem absoluta da máquina: não
+// há proxy nem mapeamento ali.
+let S = P;
+
+// A config assim que ela chega, para quem precisa dela sem poder esperar por
+// ela. Continua `null` enquanto o pedido estiver no ar.
+let configPronta = null;
+
+function fixarNo(chave, config) {
+  const total = Number(config?.shards) || 1;
+  if (total <= 1) return;
+
+  const i = nodeFor(shardKey(chave), total);
+  S = inDiscord ? `${P}${basePathFor(i)}` : (config.nodes?.[i] ?? P);
+}
+
+/**
+ * O endereço do relay, derivado da base da máquina.
+ *
+ * Quando a base é absoluta — site fora do Discord, com sharding ligado — o host
+ * tem de vir dela, e não da página: ser outra máquina é justamente o motivo de
+ * ela existir. Nos outros casos a origem é a da própria página, e a base é só
+ * um prefixo de caminho.
+ */
+function wsBase() {
+  if (/^https?:/.test(S)) return S.replace(/^http/, 'ws');
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${S}`;
+}
 
 // Um decoder e um canvas por transmissor, indexados pelo slot que o servidor
 // atribuiu. Os canvas vivem fora do DOM entre renderizações e são movidos para
@@ -1249,10 +1288,17 @@ async function boot() {
   // Buscada em paralelo, nunca antes: ela traz o diagnóstico de versão e o
   // client id de reserva, e nenhum dos dois vale segurar o login.
   const config = loadConfig();
+  // Guardada assim que chegar: o authDiscord a aproveita se já estiver aqui, e
+  // segue sem ela se não estiver, em vez de prender o arranque.
+  config.then((c) => (configPronta = c));
 
   // Sem login o lobby ainda abre: dá para ver as salas antes de entrar. Só
   // criar e entrar é que pedem identidade.
   session = inDiscord ? await authDiscord(config) : await authWeb();
+
+  // Fora do Discord não há canal: todas as salas do site moram no mesmo lugar.
+  // Dentro, quem já fixou a máquina foi o authDiscord, com o canal em mãos.
+  if (!inDiscord) fixarNo({}, await config);
 
   clientId = params.get('client_id') || (await config).clientId || null;
   checkVersion((await config).asset);
@@ -1300,7 +1346,7 @@ async function abrirPeloIngresso(ingresso) {
   console.info('[sala] chegou pelo link da atividade', chegada);
 
   try {
-    const { name, ...tokens } = await post(`${P}/api/rooms/open`, { token: ingresso });
+    const { name, ...tokens } = await post(`${S}/api/rooms/open`, { token: ingresso });
     openRoom(tokens, { id: tokens.roomId, name });
 
     // openRoom já trocou a URL para ?sala=<id>; o ingresso sai junto, para não
@@ -1321,7 +1367,7 @@ async function entrarNaCall() {
     // ao /api/rooms/call fica para quem chegou aqui sem ela: identidade
     // reaproveitada de uma visita anterior, ou servidor mais antigo.
     const tokens =
-      session?.sala ?? (await post(`${P}/api/rooms/call`, { identity: session.identity }));
+      session?.sala ?? (await post(`${S}/api/rooms/call`, { identity: session.identity }));
     openRoom(tokens, { id: tokens.roomId, name: 'Sala da call' });
   } catch (err) {
     setEmpty('Não foi possível entrar', err.message);
@@ -1499,7 +1545,7 @@ async function loadRooms() {
 
   let rooms;
   try {
-    rooms = (await post(`${P}/api/rooms/list`, { identity: session?.identity })).rooms ?? [];
+    rooms = (await post(`${S}/api/rooms/list`, { identity: session?.identity })).rooms ?? [];
   } catch (err) {
     list.replaceChildren(msgRow(`Não foi possível carregar: ${err.message}`));
     return;
@@ -1567,7 +1613,7 @@ async function enterRoom(room, password) {
   if (!session) return;
 
   try {
-    const tokens = await post(`${P}/api/rooms/join`, {
+    const tokens = await post(`${S}/api/rooms/join`, {
       identity: session.identity,
       roomId: room.id,
       password: password ?? '',
@@ -1758,6 +1804,16 @@ async function authDiscord(fonteDoId) {
 
   const { access_token } = await post(`${P}/api/token`, { code, client_id: clientId });
 
+  // A máquina desta call é escolhida aqui, antes do primeiro pedido que mexe em
+  // sala. A config foi disparada no arranque, em paralelo, e a essa altura o
+  // `ready` + `authorize` + a troca do code quase sempre levaram mais tempo do
+  // que ela — mas "quase sempre" não basta num arranque que já ficou preso em
+  // "Está demorando…" uma vez. Por isso ela é aproveitada se já chegou e nunca
+  // esperada: chegar atrasada custa um 409 e uma repetição, e esperar por ela
+  // custaria a atividade parada. Sem sharding não custa nem isso, porque não há
+  // nada para decidir.
+  fixarNo({ channel: sdk.channelId, instance: sdk.instanceId }, configPronta);
+
   // Em paralelo, e não em fila: o authenticate avisa o cliente do Discord, o
   // /api/session consulta o Discord pelo nosso servidor, e nenhum dos dois
   // depende do resultado do outro. Em série eram duas esperas somadas.
@@ -1766,7 +1822,7 @@ async function authDiscord(fonteDoId) {
   // a pessoa está mesmo naquela call.
   const [, sessao] = await Promise.all([
     sdk.commands.authenticate({ access_token }),
-    post(`${P}/api/session`, {
+    post(`${S}/api/session`, {
       access_token,
       instance_id: sdk.instanceId,
       guild_id: sdk.guildId,
@@ -1831,6 +1887,23 @@ async function post(url, body, { retry = true } = {}) {
       if (nova) return post(url, { ...body, identity: nova }, { retry: false });
     }
 
+    // 409 wrong_node: o pedido foi parar na máquina errada. Acontece quando a
+    // config não chegou a tempo, quando o bundle é velho, ou quando a borda
+    // roteou mal — e sem isto o sintoma seria uma sala que não existe, sem nada
+    // que a pessoa pudesse fazer. O servidor diz qual é a certa: repina e
+    // repete uma vez. Ver docs/sharding.md.
+    if (r.status === 409 && data.error === 'wrong_node' && retry) {
+      const antiga = S;
+      S = inDiscord ? `${P}${data.base ?? ''}` : (data.origin ?? S);
+
+      if (S !== antiga) {
+        // O caminho é o que sobra depois da base antiga — a base vazia inclusa,
+        // que é o caso de quem ainda não tinha fixado máquina nenhuma.
+        const resto = url.startsWith(antiga) ? url.slice(antiga.length) : url;
+        return post(`${S}${resto}`, body, { retry: false });
+      }
+    }
+
     // O status carrega significado (403 = senha, 429 = bloqueio, 404 = sala
     // fechou), então vai junto do erro em vez de virar texto.
     const err = new Error(data.error ?? `Servidor respondeu ${r.status}.`);
@@ -1845,10 +1918,7 @@ async function post(url, body, { retry = true } = {}) {
 
 function connect() {
   if (!roomTokens) return;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(
-    `${proto}://${location.host}${P}/ws?t=${encodeURIComponent(roomTokens.viewerToken)}`,
-  );
+  ws = new WebSocket(`${wsBase()}/ws?t=${encodeURIComponent(roomTokens.viewerToken)}`);
   ws.binaryType = 'arraybuffer';
 
   let abriu = false;
@@ -2298,10 +2368,10 @@ async function broadcastFromHere() {
   const shareToken = new URL(roomTokens.shareUrl).searchParams.get('t');
   if (!shareToken) return false;
 
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-
   const b = createBroadcaster({
-    wsUrl: `${proto}://${location.host}${P}/ws?t=${encodeURIComponent(shareToken)}`,
+    wsUrl: `${wsBase()}/ws?t=${encodeURIComponent(shareToken)}`,
+    // O /api/ice não tem estado: qualquer máquina responde, então ele segue na
+    // porta de entrada em vez de na do shard.
     apiBase: P,
     bitrate: ajustes.bitrate,
     fps: ajustes.fps,
@@ -2345,7 +2415,7 @@ $('createGo').addEventListener('click', async () => {
   const name = $('createName').value.trim();
 
   try {
-    const tokens = await post(`${P}/api/rooms/create`, {
+    const tokens = await post(`${S}/api/rooms/create`, {
       identity: session.identity,
       name,
       password: $('createPass').value || null,
@@ -2384,7 +2454,7 @@ $('roomModal').addEventListener('click', (e) => {
 
 $('roomSave').addEventListener('click', async () => {
   try {
-    const r = await post(`${P}/api/rooms/password`, {
+    const r = await post(`${S}/api/rooms/password`, {
       identity: session.identity,
       roomId: roomTokens.roomId,
       password: $('roomPass').value || '',
