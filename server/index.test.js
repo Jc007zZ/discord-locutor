@@ -96,13 +96,33 @@ describe('site buildado', () => {
   // errado, porque do lado de cá foi 200.
   //
   // O que trava o defeito não é o status: é o corpo não ser HTML.
+  // Nome fora do padrão `index-<hash>`, de propósito: esse a ponte logo abaixo
+  // atende. O que se testa aqui é o catch-all, não ela.
   it('devolve 404 para asset que não existe, em vez do index.html', async () => {
-    const resposta = await get('/assets/index-NAOEXISTE.js');
+    const resposta = await get('/assets/nao-existe-mesmo.js');
 
     expect(resposta.status).toBe(404);
     // Não basta o status: o que quebrava o navegador era receber a página. O
     // 404 do Express também é text/html, então quem distingue é o corpo.
     expect(await resposta.text()).not.toContain('<div id="app">');
+  });
+
+  // O deploy que trocou o nome do bundle deixa clientes com o index.html
+  // anterior, que pede o nome com hash. Sem a ponte eles ficam brancos até o
+  // cache do Discord ceder — e nada do lado do servidor apressa isso.
+  it('serve o bundle atual sob o nome com hash, para o HTML da era anterior', async () => {
+    const resposta = await get('/assets/index-BWsIVGgl.js');
+
+    expect(resposta.status).toBe(200);
+    expect(resposta.headers.get('content-type')).toContain('javascript');
+    expect(await resposta.text()).not.toContain('<div id="app">');
+  });
+
+  it('a ponte também vale para o css daquela era', async () => {
+    const resposta = await get('/assets/index-CCGswczz.css');
+
+    expect(resposta.status).toBe(200);
+    expect(resposta.headers.get('content-type')).toContain('css');
   });
 
   it('ainda entrega a página para caminho sem extensão, que é rota da aplicação', async () => {

@@ -1054,6 +1054,28 @@ app.use(
   }),
 );
 
+// Ponte para o HTML da era do hash.
+//
+// O nome fixo resolve o problema de todo deploy futuro, mas não o do deploy que
+// o introduziu: nesse, o cliente do Discord ainda tem guardado o index.html
+// anterior, que pede assets/index-<hash>.js — apagado pelo build. Sem esta
+// ponte ele toma 404, a Activity fica branca, e a espera dura o que o cache do
+// Discord quiser, sem que ninguém do lado de cá possa apressar.
+//
+// Servir o bundle atual sob o nome antigo encerra a espera na hora: o HTML
+// velho carrega o JS novo, que é exatamente a garantia que o nome fixo passou a
+// dar dali em diante. Fica valendo também para qualquer cliente que reapareça
+// meses depois com um HTML daquela era.
+//
+// Só os dois nomes que o Vite gerava, e só quando o arquivo de destino existe —
+// em desenvolvimento não há build, e aí isto cai no next() como qualquer outro
+// caminho que não resolve.
+app.get(/^\/assets\/index-[A-Za-z0-9_-]+\.(js|css)$/, (req, res, next) => {
+  const alvo = req.path.endsWith('.css') ? 'index.css' : 'app.js';
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(path.join(clientDist, 'assets', alvo), (err) => err && next());
+});
+
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
 
