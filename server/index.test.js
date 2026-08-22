@@ -547,6 +547,16 @@ describe('/api/rooms/call', () => {
     expect(segunda.roomId).toBe(primeira.roomId);
   });
 
+  it('não fala em máquina quando só existe uma', async () => {
+    // O `node` faz o cliente prefixar as URLs com /nK, e isso exige mapeamento
+    // no portal do Discord. Mandá-lo numa instalação de uma máquina só quebra
+    // quem nunca pediu divisão nenhuma — que é a maioria de quem roda isto.
+    const me = await identidade({ instance_id: 'call-c' });
+    const corpo = await (await post('/api/rooms/call', { identity: me.identity })).json();
+
+    expect(corpo.node).toBeUndefined();
+  });
+
   it('com call confirmada, a sala é a do canal de voz', async () => {
     const me = await identidade({ instance_id: 'call-c', call: 'canal-9' });
     const corpo = await (await post('/api/rooms/call', { identity: me.identity })).json();

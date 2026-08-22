@@ -48,6 +48,39 @@ function fixarNo(chave, config) {
 }
 
 /**
+ * Fixa a máquina pela resposta do servidor — que é quem sabe.
+ *
+ * O `fixarNo` acima é um palpite: ele depende da config ter chegado, e quando
+ * ela atrasa a base fica no ponto de entrada, que reveza. Para o HTTP isso se
+ * conserta sozinho (409 e repete), mas o WebSocket não tem essa saída: ele só
+ * fecha, e o cliente não consegue nem saber por quê.
+ *
+ * Toda resposta que entrega tokens de sala diz também de quem é a sala. Fixar
+ * por aqui elimina o palpite antes de qualquer conexão — e é por isso que esta
+ * chamada acontece em `openRoom`, que é o único lugar por onde os tokens
+ * entram, e antes do `connect()`.
+ *
+ * Sem sharding o servidor não manda `node`, e nada aqui acontece.
+ */
+function fixarPelosTokens(tokens) {
+  if (!Number.isInteger(tokens?.node)) return;
+
+  if (inDiscord) {
+    S = `${P}${basePathFor(tokens.node)}`;
+    return;
+  }
+
+  // Fora do Discord é preciso a origem absoluta, e ela vem pronta no shareUrl:
+  // ele já aponta para a máquina dona da sala.
+  try {
+    S = new URL(tokens.shareUrl).origin;
+  } catch {
+    // shareUrl ausente ou malformado: melhor manter a base que já estava do
+    // que zerar e mandar tudo para o revezamento.
+  }
+}
+
+/**
  * O endereço do relay, derivado da base da máquina.
  *
  * Quando a base é absoluta — site fora do Discord, com sharding ligado — o host
@@ -82,6 +115,11 @@ let clientId = null;
 let ws = null;
 let participants = [];
 let reconnectDelay = 1000;
+
+// Apertos de mão recusados em sequência, sem nenhum ter aberto. Zera assim que
+// um abre. É o contador do freio lá no `close` — ver a nota longa por lá.
+let recusas = 0;
+const MAX_RECUSAS = 5;
 let lagTimer = null;
 // Transmissão nascida aqui dentro, quando o Discord permite capturar no iframe.
 let myBroadcast = null;
@@ -1679,6 +1717,9 @@ function setRoomUrl(id) {
 }
 
 function openRoom(tokens, room) {
+  // Antes de tudo: é daqui que sai a base usada pelo connect() logo abaixo.
+  fixarPelosTokens(tokens);
+
   roomTokens = tokens;
   roomInfo = room;
 
@@ -1933,6 +1974,7 @@ function connect() {
   ws.addEventListener('open', () => {
     abriu = true;
     reconnectDelay = 1000;
+    recusas = 0;
     $('grid').hidden = false;
     setEmpty('Ninguém na sala', 'Aguardando participantes.');
 
@@ -2026,7 +2068,17 @@ function connect() {
       // ela. No site, quem some é a sala escolhida, então o lugar é a lista.
       if (inDiscord) {
         limparSala();
-        entrarNaCall();
+
+        // Mesmo freio do `close`, e por escapar dele é que precisa do seu: ao
+        // zerar `roomTokens` acima, este caminho faz o `close` sair na primeira
+        // linha. Sem isto, uma sala que insiste em não existir vira o mesmo
+        // laço apertado por outra porta.
+        recusas++;
+        if (recusas > MAX_RECUSAS) {
+          setEmpty('Não foi possível entrar', 'A sala não abre. Feche e abra de novo.');
+          return;
+        }
+        setTimeout(entrarNaCall, Math.min(1000 * 2 ** (recusas - 1), 15_000));
       } else {
         toast('A sala foi fechada.', true);
         showLobby();
@@ -2046,17 +2098,36 @@ function connect() {
     // Saímos da sala de propósito: nada a reconectar.
     if (!roomTokens) return;
 
-    // Fechou sem nunca abrir: o token da sala foi recusado. Guardado, ele não
-    // vale mais depois que o servidor troca o segredo — e reconectar com o
-    // mesmo token repete o 401 até o fim dos tempos. Descartar e recomeçar é o
-    // único caminho que sai daqui.
+    // Fechou sem nunca abrir: o servidor recusou o aperto de mão. Descartar o
+    // token e recomeçar é o único caminho que sai daqui — mas com freio.
+    //
+    // Sem o freio isto era um laço apertado: recomeçar refaz o fluxo inteiro
+    // (pedir a sala, abrir o socket) na velocidade que a rede permitir, e como
+    // todo o tráfego da atividade sai pelos poucos IPs do proxy do Discord, o
+    // que a borda vê é uma enxurrada vinda de um punhado de endereços. Ela
+    // responde 429 — para todo mundo, inclusive para quem não estava em laço.
+    //
+    // O motivo da recusa não é visível daqui: o navegador não expõe o status
+    // de um aperto de mão que falhou, então token vencido e máquina errada
+    // chegam iguais. Por isso o freio é por tempo e por tentativa, e não por
+    // causa: ele tem de segurar qualquer recusa que se repita.
     if (!abriu) {
       const id = roomInfo?.id;
       limparSala();
       if (id) remove(`sala:${id}`);
+
+      recusas++;
+      if (recusas > MAX_RECUSAS) {
+        setEmpty('Não foi possível entrar', 'O servidor recusou a conexão. Feche e abra de novo.');
+        return;
+      }
+
+      const espera = Math.min(1000 * 2 ** (recusas - 1), 15_000);
       toast('Sua sessão expirou. Entrando de novo…');
-      if (inDiscord) entrarNaCall();
-      else showLobby();
+      setTimeout(() => {
+        if (inDiscord) entrarNaCall();
+        else showLobby();
+      }, espera);
       return;
     }
 

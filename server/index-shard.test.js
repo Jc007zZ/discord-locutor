@@ -175,6 +175,27 @@ describe('shareUrl', () => {
   });
 });
 
+describe('dono na resposta', () => {
+  // O cliente calculava o nó sozinho, e errava quando a config atrasava. O
+  // WebSocket, ao contrário do HTTP, não tinha como se corrigir depois: só
+  // fechava, e o cliente reabria em laço. Dizer o dono aqui tira o palpite do
+  // caminho antes de qualquer conexão.
+  it('diz qual máquina é a dona da sala', async () => {
+    const r = await post('/api/rooms/call', { identity: await identidade(CANAL_DAQUI) });
+
+    expect(await r.json()).toMatchObject({ node: 0 });
+  });
+
+  it('o dono bate com a origem do shareUrl', async () => {
+    const r = await post('/api/rooms/call', { identity: await identidade(CANAL_DAQUI) });
+    const { node, shareUrl } = await r.json();
+
+    // As duas informações saem do mesmo cálculo; se divergirem, o cliente do
+    // site e o do Discord vão para máquinas diferentes.
+    expect(new URL(shareUrl).origin).toBe([AQUI, LA][node]);
+  });
+});
+
 describe('CORS entre as máquinas', () => {
   // Só quem abre o site fora do Discord passa por aqui: ali o cliente fala com
   // a máquina da sala pela origem absoluta dela. Sem estes headers o navegador

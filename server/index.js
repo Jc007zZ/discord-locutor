@@ -673,10 +673,21 @@ function issueRoomTokens(roomId, me) {
     guild: me.guild ?? null,
     channel: me.channel ?? me.call ?? null,
   };
+  const dono = noDaChave(chaveDe(me));
+
   return {
     roomId,
+    // Quem manda nesta sala, dito por quem sabe. O cliente calculava isso
+    // sozinho, e quando a config atrasava ele errava — e o WebSocket, ao
+    // contrário do HTTP, não tinha como se corrigir depois. Vindo na resposta,
+    // não há o que atrasar nem o que adivinhar.
+    //
+    // Só quando há mais de uma máquina: numa só, mandar `node` faria o cliente
+    // prefixar as URLs com /n0, que exigiria mapeamento no portal do Discord
+    // para uma divisão que não existe.
+    ...(FATIADO ? { node: dono } : {}),
     viewerToken: signToken({ ...base, role: 'viewer' }),
-    shareUrl: `${origemDoNo(noDaChave(chaveDe(me)))}/share.html?t=${encodeURIComponent(
+    shareUrl: `${origemDoNo(dono)}/share.html?t=${encodeURIComponent(
       signToken({ ...base, role: 'broadcaster' }),
     )}`,
   };
